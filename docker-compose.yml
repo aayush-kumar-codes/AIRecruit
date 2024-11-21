@@ -1,0 +1,643 @@
+version: '3.7'
+
+services:
+
+    rabbitmq:
+        image: rabbitmq:3-management
+        hostname: rabbitmq
+        ports:
+            # The standard AMQP protocol port
+            - '5672:5672'
+            # HTTP management UI
+            - '15672:15672'
+        networks:
+            - ai
+        restart: "no"
+
+
+    create_certs:
+        container_name: create_certs
+        image: docker.elastic.co/elasticsearch/elasticsearch:7.8.1
+        command: >
+            bash -c '
+            if [[ ! -f ./config/certificates/elastic-certificates.p12 ]]; then
+                bin/elasticsearch-certutil cert -out config/certificates/elastic-certificates.p12 -pass ""
+            fi;
+            chown -R 1000:0 /usr/share/elasticsearch/config/certificates
+            '
+        user: "0"
+        working_dir: /usr/share/elasticsearch
+        volumes: ['certs:/usr/share/elasticsearch/config/certificates']
+
+                
+    elasticsearch:
+        image: docker.elastic.co/elasticsearch/elasticsearch:7.8.1
+        container_name: elasticsearch
+        volumes:
+            - type: bind
+              source: ./config/elasticsearch/config/elasticsearch.yml
+              target: /usr/share/elasticsearch/config/elasticsearch.yml
+              read_only: true
+            - type: volume
+              source: elasticsearch
+              target: /usr/share/elasticsearch/data
+            - type: volume
+              source: certs
+              target: /usr/share/elasticsearch/config/certificates
+        ports:
+            - "9200:9200"
+            - "9300:9300"
+        ulimits:
+            memlock:
+                soft: -1
+                hard: -1
+        environment:
+            - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+            - ELASTIC_USERNAME=${ELASTIC_USERNAME}
+            - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+            - xpack.security.enabled=true
+            - xpack.security.transport.ssl.enabled=true
+            - xpack.security.transport.ssl.verification_mode=certificate
+            - xpack.security.transport.ssl.keystore.path=/usr/share/elasticsearch/config/certificates/elastic-certificates.p12
+            - xpack.security.transport.ssl.truststore.path=/usr/share/elasticsearch/config/certificates/elastic-certificates.p12
+        
+            # Use single node discovery in order to disable production mode and avoid bootstrap checks
+            # see https://www.elastic.co/guide/en/elasticsearch/reference/current/bootstrap-checks.html
+            - discovery.type=single-node
+        networks:
+            - ai
+        
+    kibana:
+        image: docker.elastic.co/kibana/kibana:7.8.1
+        environment:
+            SERVER_NAME: kibana.local
+        volumes:
+            - type: bind
+              source: ./config/kibana/config/kibana.yml
+              target: /usr/share/kibana/config/kibana.yml
+              read_only: true
+        ports:
+            - "5601:5601"
+        depends_on:
+            - elasticsearch
+        networks:
+            - ai
+
+    logstash:
+        image: docker.elastic.co/logstash/logstash:7.9.0
+        volumes:
+            - type: bind
+              source: ./config/logstash/config/logstash.yml
+              target: /usr/share/logstash/config/logstash.yml
+              read_only: true
+            - type: bind
+              source: ./config/logstash/pipeline
+              target: /usr/share/logstash/pipeline
+              read_only: true
+        ports:
+        - "5005:5000/tcp"
+        - "5005:5000/udp"
+        - "9600:9600"
+        environment:
+            - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+        depends_on:
+            - elasticsearch
+        networks:
+            - ai
+
+    # filebeat:
+    #     image: docker.elastic.co/beats/filebeat:7.9.0
+    #     user:
+    #         root
+    #     volumes:
+    #         - ./config/filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+    #         - /var/lib/docker:/var/lib/docker:ro
+    #         - /var/run/docker.sock:/var/run/docker.sock
+    #         - /var/log/recruitai:/var/log/recruitai:ro
+    #     command: ["--strict.perms=false"]
+    #     depends_on:
+    #         - logstash
+    #     networks:
+    #         - ai
+
+
+    # label-studio-ner:
+    #     image: recruitai/ner:latest
+    #     build: ./label-studio/ner
+    #     ports:
+    #         - 8000:8080
+    #     volumes:
+    #         - ./label-studio/ner/project:/label-studio/ner
+    #     networks:
+    #         - ai
+    
+
+    # deepset-haystack:
+    #     image: deepset/haystack-annotation:latest
+    #     container_name: haystack-annotation
+    #     environment:
+    #         DEFAULT_ADMIN_EMAIL: "manish@excellencetechnologies.in"
+    #         DEFAULT_ADMIN_PASSWORD: "${DEFAULT_ADMIN_PASSWORD}"
+    #         NODE_ENV: "production"
+    #         PROD_DB_HOSTNAME: "db"
+    #         PROD_DB_NAME: "qa123"
+    #         PROD_DB_USERNAME: "qa"
+    #         PROD_DB_PASSWORD: "${PROD_DB_PASSWORD}"
+    #     ports:
+    #         - "7001:7001"
+    #     # links:
+    #     #     - "db:database"
+    #     depends_on:
+    #         - db
+    #     networks:
+    #         - ai
+    #     restart: unless-stopped
+
+    db:
+        image: "postgres:12"
+        container_name: "postgres"
+        environment:
+            POSTGRES_USER: "qa"
+            POSTGRES_PASSWORD: "qa123"
+            POSTGRES_DB: "${POSTGRES_DB}"
+        ports:
+            - "5432:5432"
+        volumes:
+            - ./postgres-data2:/var/lib/psql/data
+        networks:
+            - ai
+        restart: unless-stopped
+
+    redis:
+        image: bitnami/redis:latest
+        # command: ["redis-server", "--appendonly", "yes"] # https://redis.io/topics/persistence
+        command: /opt/bitnami/scripts/redis/run.sh --appendonly no
+        environment: 
+            - ALLOW_EMPTY_PASSWORD=yes
+            - REDIS_REPLICATION_MODE=master
+        volumes:
+            - /home/manish/redis-data:/bitnami/redis/data
+            - /var/log/redis:/var/log/redis
+        ports:
+            - 6379:6379
+        networks:
+            - ai
+            
+    # redis-replica:
+    #     image: 'bitnami/redis:latest'
+    #     ports:
+    #         - '6379'
+    #     depends_on:
+    #         - redis
+    #     environment:
+    #         - REDIS_REPLICATION_MODE=slave
+    #         - REDIS_MASTER_HOST=redis
+    #         - REDIS_MASTER_PORT_NUMBER=6379
+    #         - ALLOW_EMPTY_PASSWORD=yes
+    #         # - REDIS_MASTER_PASSWORD=my_master_password
+    #         # - REDIS_PASSWORD=my_replica_password
+    #     networks:
+    #         - ai
+
+    # redis-replica-2:
+    #     image: 'bitnami/redis:latest'
+    #     ports:
+    #         - '6379'
+    #     depends_on:
+    #         - redis
+    #     environment:
+    #         - REDIS_REPLICATION_MODE=slave
+    #         - REDIS_MASTER_HOST=redis
+    #         - REDIS_MASTER_PORT_NUMBER=6379
+    #         - ALLOW_EMPTY_PASSWORD=yes
+    #         # - REDIS_MASTER_PASSWORD=my_master_password
+    #         # - REDIS_PASSWORD=my_replica_password
+    #     networks:
+    #         - ai
+
+    memcached:
+        image: 'bitnami/memcached:latest'
+        command: /opt/bitnami/scripts/memcached/run.sh -I 256m -vvv
+        environment:
+            - MEMCACHED_CACHE_SIZE=10240
+            - MEMCACHED_THREADS=8
+        ports:
+            - 11211:11211
+        networks:
+            - ai
+
+    api:
+        image: recruitai/api:latest
+        build:  
+            context: .
+            dockerfile: microservice/api/Dockerfile
+        ports:
+            - "8086:5001"
+        volumes:
+            - ./pretrained:/workspace/pretrained:ro
+            - ./cvreconstruction:/workspace/cvreconstruction 
+            - /var/log/recruitai:/workspace/logs 
+            - ./gcp-service-account.json:/workspace/RecruitAI.json:ro
+            - ./gcp-service-account.json:/workspace/app/RecruitAI.json:ro            
+            - ./account.config.json:/workspace/app/account.config.json:ro
+            - ./microservice/api/app:/workspace/app
+            - ./label-studio/ner/project:/workspace/ner
+        environment:
+            - IS_DEV=False
+            - RABBIT_DB=amqp://rabbitmq?connection_attempts=5&retry_delay=5&heartbeat=3600
+            - BATCH_PROCESSING_DELAY=60
+        depends_on:
+            - elasticsearch
+            - redis
+            - memcached
+        networks:
+            - ai
+        restart: "no"
+        
+    resumemq:
+        image: recruitai/resumemq:latest
+        build: 
+            context: .
+            dockerfile: microservice/resume/Dockerfile
+        volumes:
+            # - ./pretrained:/workspace/pretrained:ro
+            - /var/log/recruitai:/workspace/logs  
+            - ./microservice/resume/app:/workspace/app       
+            - ./gcp-service-account.json:/workspace/RecruitAI.json:ro
+            - ./gcp-service-account.json:/workspace/app/RecruitAI.json:ro            
+            - ./account.config.json:/workspace/app/account.config.json:ro     
+        environment:
+            RABBIT_DB: amqp://rabbitmq?connection_attempts=5&retry_delay=5&heartbeat=3600
+            RESUME_PARALLEL_PROCESS: 1
+        networks:
+            - ai
+    
+    picturemq:
+        build: 
+            context: .
+            dockerfile: microservice/picture/Dockerfile
+        image: recruitai/picturemq:latest
+        volumes:
+            - ./pretrained:/workspace/pretrained:ro
+            - ./cvreconstruction:/workspace/cvreconstruction 
+            - /var/log/recruitai:/workspace/logs  
+            - ./microservice/picture/app:/workspace/app            
+            - ./gcp-service-account.json:/workspace/RecruitAI.json:ro
+            - ./gcp-service-account.json:/workspace/app/RecruitAI.json:ro            
+            - ./account.config.json:/workspace/app/account.config.json:ro
+        environment:
+            RABBIT_DB: amqp://rabbitmq?connection_attempts=5&retry_delay=5
+        networks:
+            - ai
+
+    summarymq:
+        image: recruitai/summarymq:latest
+        build: 
+            context: .
+            dockerfile: microservice/summary/Dockerfile
+        volumes:
+            - ./pretrained:/workspace/pretrained:ro
+            - ./cvreconstruction:/workspace/cvreconstruction 
+            - /var/log/recruitai:/workspace/logs  
+            - ./microservice/summary/app:/workspace/app            
+            - ./gcp-service-account.json:/workspace/RecruitAI.json:ro
+            - ./gcp-service-account.json:/workspace/app/RecruitAI.json:ro            
+            - ./account.config.json:/workspace/app/account.config.json:ro
+        environment:
+            RABBIT_DB: amqp://rabbitmq?connection_attempts=5&retry_delay=5
+            HUGGINGFACE_INTERFACE_API: ${HUGGINGFACE_INTERFACE_API}
+        networks:
+            - ai
+
+    qafullmq:
+        image: recruitai/qafullmq:latest
+        build: 
+            context: .
+            dockerfile: microservice/qafull/Dockerfile
+        volumes:
+            - ./pretrained:/workspace/pretrained:ro
+            - /var/log/recruitai:/workspace/logs  
+            - ./microservice/qafull/app:/workspace/app            
+            - ./gcp-service-account.json:/workspace/RecruitAI.json:ro
+            - ./gcp-service-account.json:/workspace/app/RecruitAI.json:ro            
+            - ./account.config.json:/workspace/app/account.config.json:ro
+        environment:
+            RABBIT_DB: amqp://rabbitmq?connection_attempts=5&retry_delay=5
+        networks:
+            - ai
+
+    classifymq:
+        image: recruitai/classifymq:latest
+        build: 
+            context: .
+            dockerfile: microservice/classify/Dockerfile
+        volumes:
+            - ./pretrained:/workspace/pretrained:ro
+            - ./cvreconstruction:/workspace/cvreconstruction 
+            - /var/log/recruitai:/workspace/logs  
+            - ./microservice/classify/app:/workspace/app            
+            - ./gcp-service-account.json:/workspace/RecruitAI.json:ro
+            - ./gcp-service-account.json:/workspace/app/RecruitAI.json:ro            
+            - ./account.config.json:/workspace/app/account.config.json:ro
+        environment:
+            RABBIT_DB: amqp://rabbitmq?connection_attempts=5&retry_delay=5&heartbeat=3600
+        networks:
+            - ai
+    
+    skillmq:
+        image: recruitai/skillmq:latest
+        build: 
+            context: .
+            dockerfile: microservice/skill/Dockerfile
+        volumes:
+            - ./pretrained:/workspace/pretrained:ro
+            - ./cvreconstruction:/workspace/cvreconstruction 
+            - /var/log/recruitai:/workspace/logs  
+            - ./microservice/skill/app:/workspace/app            
+            - ./gcp-service-account.json:/workspace/RecruitAI.json:ro
+            - ./gcp-service-account.json:/workspace/app/RecruitAI.json:ro            
+            - ./account.config.json:/workspace/app/account.config.json:ro
+        # Environment variables:
+        environment:
+            RABBIT_DB: amqp://rabbitmq?connection_attempts=5&retry_delay=5&heartbeat=3600
+            
+        networks:
+            - ai
+    
+    searchmq:
+        image: recruitai/searchmq:latest
+        build: 
+            context: .
+            dockerfile: microservice/search/Dockerfile
+        volumes:
+            - ./pretrained:/workspace/pretrained:ro
+            - ./cvreconstruction:/workspace/cvreconstruction 
+            - /var/log/recruitai:/workspace/logs  
+            - ./microservice/search/app:/workspace/app            
+            - ./gcp-service-account.json:/workspace/RecruitAI.json:ro
+            - ./gcp-service-account.json:/workspace/app/RecruitAI.json:ro            
+            - ./account.config.json:/workspace/app/account.config.json:ro
+        environment:
+            - RABBIT_DB=amqp://rabbitmq?connection_attempts=5&retry_delay=5&heartbeat=3600
+            - ELASTIC_USERNAME=elastic
+            - ELASTIC_PASSWORD=DkIedPPSCb
+        depends_on: 
+            - rabbitmq
+            - redis
+            - memcached
+        networks:
+            - ai
+
+    searchindexmq:
+        image: recruitai/searchindex:latest
+        build: 
+            context: .
+            dockerfile: microservice/searchindex/Dockerfile
+        volumes:
+            - ./pretrained:/workspace/pretrained:ro
+            - ./cvreconstruction:/workspace/cvreconstruction 
+            - /var/log/recruitai:/workspace/logs  
+            - ./microservice/searchindex/app:/workspace/app      
+            - ./gcp-service-account.json:/workspace/RecruitAI.json:ro
+            - ./gcp-service-account.json:/workspace/app/RecruitAI.json:ro            
+            - ./account.config.json:/workspace/app/account.config.json:ro      
+        environment:
+            - RABBIT_DB=amqp://rabbitmq?connection_attempts=5&retry_delay=5&heartbeat=3600
+            - ELASTIC_USERNAME=elastic
+            - ELASTIC_PASSWORD=DkIedPPSCb
+        depends_on: 
+            - elasticsearch
+            - redis
+            - memcached
+        networks:
+            - ai
+
+    skillextractmq:
+        image: recruitai/skillextractmq:latest
+        build: 
+            context: .
+            dockerfile: microservice/skillextract/Dockerfile
+        volumes:
+            - ./pretrained:/workspace/pretrained:ro
+            - ./cvreconstruction:/workspace/cvreconstruction 
+            - /var/log/recruitai:/workspace/logs  
+            - ./microservice/skillextract/app:/workspace/app   
+            - ./gcp-service-account.json:/workspace/RecruitAI.json:ro
+            - ./gcp-service-account.json:/workspace/app/RecruitAI.json:ro            
+            - ./account.config.json:/workspace/app/account.config.json:ro         
+        environment:
+            RABBIT_DB: amqp://rabbitmq?connection_attempts=5&retry_delay=5
+        networks:
+            - ai
+        depends_on: 
+            - rabbitmq
+            - redis
+            - memcached
+    
+    gendermq:
+        image: recruitai/gendermq:latest
+        build: 
+            context: .
+            dockerfile: microservice/gender/Dockerfile
+        volumes:
+            - ./pretrained:/workspace/pretrained:ro
+            - ./cvreconstruction:/workspace/cvreconstruction 
+            - /var/log/recruitai:/workspace/logs  
+            - ./microservice/gender/app:/workspace/app            
+            - ./gcp-service-account.json:/workspace/RecruitAI.json:ro
+            - ./gcp-service-account.json:/workspace/app/RecruitAI.json:ro            
+            - ./account.config.json:/workspace/app/account.config.json:ro
+        environment:
+            RABBIT_DB: amqp://rabbitmq?connection_attempts=5&retry_delay=5
+        networks:
+            - ai
+
+    imagemq:
+        image: recruitai/imagemq:latest
+        build: 
+            context: .
+            dockerfile: microservice/image/Dockerfile
+        volumes:
+            - ./pretrained:/workspace/pretrained:ro
+            - /var/log/recruitai:/workspace/logs  
+            - ./microservice/image/app:/workspace/app
+            - ./gcp-service-account.json:/workspace/RecruitAI.json:ro
+            - ./gcp-service-account.json:/workspace/app/RecruitAI.json:ro            
+            - ./account.config.json:/workspace/app/account.config.json:ro            
+        environment:
+            RABBIT_DB: amqp://rabbitmq?connection_attempts=5&retry_delay=5
+        networks:
+            - ai
+        
+
+    datasyncmq:
+        image: recruitai/datasyncmq:latest
+        build: 
+            context: .
+            dockerfile: microservice/datasync/Dockerfile
+        volumes:
+            - ./pretrained:/workspace/pretrained:ro
+            - ./cvreconstruction:/workspace/cvreconstruction 
+            - /var/log/recruitai:/workspace/logs  
+            - ./microservice/datasync/app:/workspace/app            
+            - ./gcp-service-account.json:/workspace/RecruitAI.json:ro
+            - ./gcp-service-account.json:/workspace/app/RecruitAI.json:ro            
+            - ./account.config.json:/workspace/app/account.config.json:ro
+        environment:
+            RABBIT_DB: amqp://rabbitmq?connection_attempts=5&retry_delay=5
+            CRON_SCHEDULE: '0 0 * * *'
+            RABBIT_API_URL: 'http://116.202.234.182:15672'
+            RABBIT_LOGIN: 'guest:guest'
+        networks:
+            - ai
+        depends_on: 
+            - rabbitmq
+            - redis
+            - memcached
+
+    candidatemq:
+        image: recruitai/candidatemq:latest
+        build: 
+            context: .
+            dockerfile: microservice/candidate/Dockerfile
+        volumes:
+            - ./pretrained:/workspace/pretrained:ro
+            - ./cvreconstruction:/workspace/cvreconstruction 
+            - /var/log/recruitai:/workspace/logs  
+            - ./microservice/candidate/app:/workspace/app            
+            - ./gcp-service-account.json:/workspace/RecruitAI.json:ro
+            - ./gcp-service-account.json:/workspace/app/RecruitAI.json:ro            
+            - ./account.config.json:/workspace/app/account.config.json:ro
+        environment:
+            RABBIT_DB: amqp://rabbitmq?connection_attempts=5&retry_delay=5
+        networks:
+            - ai
+        depends_on: 
+            - rabbitmq
+            - redis
+            - memcached
+
+    filtermq:
+        image: recruitai/filtermq:latest
+        build: 
+            context: .
+            dockerfile: microservice/filter/Dockerfile
+        volumes:
+            - ./pretrained:/workspace/pretrained:ro
+            - ./cvreconstruction:/workspace/cvreconstruction 
+            - /var/log/recruitai:/workspace/logs  
+            - ./microservice/filter/app:/workspace/app            
+            - ./gcp-service-account.json:/workspace/RecruitAI.json:ro
+            - ./gcp-service-account.json:/workspace/app/RecruitAI.json:ro            
+            - ./account.config.json:/workspace/app/account.config.json:ro
+        environment:
+            RABBIT_DB: amqp://rabbitmq?connection_attempts=5&retry_delay=5
+        networks:
+            - ai
+        depends_on: 
+            - rabbitmq
+            - redis
+            - memcached
+        
+    statsmq:
+        image: recruitai/statsmq:latest
+        build: 
+            context: .
+            dockerfile: microservice/stats/Dockerfile
+        volumes:
+            - ./pretrained:/workspace/pretrained:ro
+            - /var/log/recruitai:/workspace/logs  
+            - ./microservice/stats/app:/workspace/app        
+            - /var/run/docker.sock:/var/run/docker.sock
+            - ./gcp-service-account.json:/workspace/RecruitAI.json:ro
+            - ./gcp-service-account.json:/workspace/app/RecruitAI.json:ro            
+            - ./account.config.json:/workspace/app/account.config.json:ro
+        environment:
+            RABBIT_DB: 'amqp://127.0.0.1:5672'
+            RABBIT_API_URL: 'http://127.0.0.1:15672'
+            RABBIT_LOGIN: 'guest:guest'
+        network_mode: host
+        depends_on: 
+            - rabbitmq
+            - redis
+            - memcached
+
+    statsdatamq:
+        image: recruitai/statsdatamq:latest
+        build: 
+            context: .
+            dockerfile: microservice/statsdata/Dockerfile
+        volumes:
+            - ./pretrained:/workspace/pretrained:ro
+            - /var/log/recruitai:/workspace/logs  
+            - ./microservice/statsdata/app:/workspace/app        
+            - ./gcp-service-account.json:/workspace/RecruitAI.json:ro
+            - ./gcp-service-account.json:/workspace/app/RecruitAI.json:ro            
+            - ./account.config.json:/workspace/app/account.config.json:ro
+        environment:
+            RABBIT_DB: 'amqp://127.0.0.1:5672'
+        network_mode: host
+        depends_on: 
+            - rabbitmq
+            - redis
+            - memcached
+
+    zeroshotmq:
+        image: recruitai/zeroshotmq:latest
+        build: 
+            context: .
+            dockerfile: microservice/zeroshot/Dockerfile
+        volumes:
+            - ./pretrained:/workspace/pretrained:ro
+            - /var/log/recruitai:/workspace/logs  
+            - ./microservice/zeroshot/app:/workspace/app        
+            - ./gcp-service-account.json:/workspace/RecruitAI.json:ro
+            - ./gcp-service-account.json:/workspace/app/RecruitAI.json:ro            
+            - ./account.config.json:/workspace/app/account.config.json:ro
+        environment:
+            RABBIT_DB: 'amqp://127.0.0.1:5672'
+            HUGGINGFACE_INTERFACE_API: ${HUGGINGFACE_INTERFACE_API}
+        network_mode: host
+        depends_on: 
+            - rabbitmq
+            - redis
+            - memcached
+    
+    gpu:
+        build: 
+            context: .
+            dockerfile: microservice/gpucloud/Dockerfile
+        volumes:
+            - ./pretrained:/workspace/pretrained:ro
+            - /var/log/recruitai:/workspace/logs  
+            - ./microservice/gpucloud/app:/workspace/app        
+            - /var/run/docker.sock:/var/run/docker.sock
+            - ./gcp-service-account.json:/workspace/RecruitAI.json:ro
+            - ./gcp-service-account.json:/workspace/app/RecruitAI.json:ro            
+            - ./account.config.json:/workspace/app/account.config.json:ro
+        environment:
+            RABBIT_DB: 'amqp://127.0.0.1:5672'
+            RABBIT_API_URL: 'http://127.0.0.1:15672'
+            RABBIT_LOGIN: 'guest:guest'
+            SENDGRID_API_KEY: ${SENDGRID_API_KEY}
+            SLACK_TOKEN: ${SLACK_TOKEN}
+        network_mode: host
+        depends_on: 
+            - rabbitmq
+            - redis
+            - memcached
+
+    duckling:
+        image: rasa/duckling:latest
+        # network_mode: host
+        ports:
+            - "8000:8000"
+
+
+volumes: 
+    elasticsearch:
+    redis-data:
+    certs:
+
+networks:
+    ai:
