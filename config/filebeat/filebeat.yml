@@ -1,0 +1,31 @@
+filebeat.config:
+  modules:
+    path: ${path.config}/modules.d/*.yml
+    reload.enabled: false
+
+filebeat.autodiscover:
+  providers:
+    - type: docker
+      hints.enabled: true
+
+processors:
+- add_cloud_metadata: ~
+
+filebeat.inputs:
+  - type: log
+    enabled: true
+    paths:
+      - /var/log/recruitai/*.log
+      
+# output.logstash:
+#   hosts: 'logstash:5000'
+
+output.elasticsearch:
+  hosts: 'elasticsearch:9200'
+  username: 'elastic'
+  password: 'DkIedPPSCb'
+
+setup.kibana:
+  host: "kibana:5601"
+
+logging.level: info
